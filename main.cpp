@@ -1,107 +1,68 @@
 #include <QCoreApplication>
 
+#include <stdlib.h>
+#include <stdio.h>
+
 #define  WPCAP
 #define  HAVE_REMOTE
-#include "pcap.h"
-
-/* prototype of the packet handler */
-void packet_handler(u_char *param, const struct pcap_pkthdr *header, const u_char *pkt_data);
+#include <pcap.h>
 
 int main(int argc, char *argv[])
 {
-    pcap_if_t *alldevs;
-    pcap_if_t *d;
-    int inum;
-    int i=0;
-    pcap_t *adhandle;
+    pcap_t *fp;
     char errbuf[PCAP_ERRBUF_SIZE];
-    pcap_dumper_t *dumpfile;
+    u_char packet[100];
+    int i;
 
-    /* Check command line */
-    if(argc != 2)
+    /* Check the validity of the command line */
+    if (argc != 2)
     {
-        printf("usage: %s filename", argv[0]);
+        printf("usage: %s interface (e.g. 'rpcap://eth0')", argv[0]);
         return -1;
     }
 
-    /* Retrieve the device list from the local machine */
-    if (pcap_findalldevs(&alldevs, errbuf) == -1)
+    /* Open the output device */
+    if ( (fp= pcap_open_live(argv[1],          // name of the device
+                             100,              // portion of the packet to capture
+                             PCAP_OPENFLAG_PROMISCUOUS,    // promiscuous mode
+                             1000,             // read timeout
+                             errbuf            // error buffer
+                             ) ) == NULL)
     {
-        fprintf(stderr,"Error in pcap_findalldevs_ex: %s\n", errbuf);
-        exit(1);
-    }
-
-    /* Print the list */
-    for(d=alldevs; d; d=d->next)
-    {
-        printf("%d. %s", ++i, d->name);
-        if (d->description)
-            printf(" (%s)\n", d->description);
-        else
-            printf(" (No description available)\n");
-    }
-
-    if(i==0)
-    {
-        printf("\nNo interfaces found! Make sure WinPcap is installed.\n");
+        fprintf(stderr,"\nUnable to open the adapter. %s is not supported by WinPcap\n", argv[1]);
         return -1;
     }
 
-    printf("Enter the interface number (1-%d):",i);
-    scanf("%d", &inum);
+    /* Supposing to be on ethernet, set mac destination to 1:1:1:1:1:1 */
+    packet[0]=1;
+    packet[1]=1;
+    packet[2]=1;
+    packet[3]=1;
+    packet[4]=1;
+    packet[5]=1;
 
-    if(inum < 1 || inum > i)
+    /* set mac source to 2:2:2:2:2:2 */
+    packet[6]=2;
+    packet[7]=2;
+    packet[8]=2;
+    packet[9]=2;
+    packet[10]=2;
+    packet[11]=2;
+
+    /* Fill the rest of the packet */
+    for(i=12;i<100;i++)
     {
-        printf("\nInterface number out of range.\n");
-        /* Free the device list */
-        pcap_freealldevs(alldevs);
-        return -1;
+        packet[i]=(u_char)i;
     }
 
-    /* Jump to the selected adapter */
-    for(d=alldevs, i=0; i< inum-1 ;d=d->next, i++);
-
-
-    /* Open the device */
-    if ( (adhandle= pcap_open_live(d->name,          // name of the device
-                                   65536,            // portion of the packet to capture
-                                                     // 65536 guarantees that the whole packet will be captured on all the link layers
-                                   PCAP_OPENFLAG_PROMISCUOUS,    // promiscuous mode
-                                   1000,             // read timeout
-                                   errbuf            // error buffer
-                                   ) ) == NULL)
+    /* Send down the packet */
+    if (pcap_sendpacket(fp, packet, 100 /* size */) != 0)
     {
-        fprintf(stderr,"\nUnable to open the adapter. %s is not supported by WinPcap\n", d->name);
-        /* Free the device list */
-        pcap_freealldevs(alldevs);
+        fprintf(stderr,"\nError sending the packet: %s\n", pcap_geterr(fp));
         return -1;
     }
-
-    /* Open the dump file */
-    dumpfile = pcap_dump_open(adhandle, argv[1]);
-
-    if(dumpfile==NULL)
-    {
-        fprintf(stderr,"\nError opening output file\n");
-        return -1;
-    }
-
-    printf("\nlistening on %s... Press Ctrl+C to stop...\n", d->description);
-
-    /* At this point, we no longer need the device list. Free it */
-    pcap_freealldevs(alldevs);
-
-    /* start the capture */
-    pcap_loop(adhandle, 0, packet_handler, (unsigned char *)dumpfile);
 
     QCoreApplication a(argc, argv);
 
     return a.exec();
-}
-
-/* Callback function invoked by libpcap for every incoming packet */
-void packet_handler(u_char *dumpfile, const struct pcap_pkthdr *header, const u_char *pkt_data)
-{
-    /* save the packet on the dump file */
-    pcap_dump(dumpfile, header, pkt_data);
 }
