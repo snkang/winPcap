@@ -56,6 +56,7 @@ time_t local_tv_sec;
     /* Jump to the selected adapter */
     for(d=alldevs, i=0; i< inum-1 ;d=d->next, i++);
 
+
     /* Open the device */
     if ( (adhandle= pcap_open(d->name,          // name of the device
                               65536,            // portion of the packet to capture.
@@ -67,6 +68,34 @@ time_t local_tv_sec;
                               ) ) == NULL)
     {
         fprintf(stderr,"\nUnable to open the adapter. %s is not supported by WinPcap\n", d->name);
+        /* Free the device list */
+        pcap_freealldevs(alldevs);
+        return -1;
+    }
+
+    ULONG netmask;
+    if (d->addresses != NULL)
+        /* Retrieve the mask of the first address of the interface */
+        netmask=((struct sockaddr_in *)(d->addresses->netmask))->sin_addr.S_un.S_addr;
+    else
+        /* If the interface is without an address we suppose to be in a C class network */
+        netmask=0xffffff;
+
+
+    //compile the filter
+    bpf_program fcode;
+    if (pcap_compile(adhandle, &fcode, "ip and tcp", 1, netmask) < 0)
+    {
+        fprintf(stderr,"\nUnable to compile the packet filter. Check the syntax.\n");
+        /* Free the device list */
+        pcap_freealldevs(alldevs);
+        return -1;
+    }
+
+    //set the filter
+    if (pcap_setfilter(adhandle, &fcode) < 0)
+    {
+        fprintf(stderr,"\nError setting the filter.\n");
         /* Free the device list */
         pcap_freealldevs(alldevs);
         return -1;
