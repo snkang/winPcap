@@ -4,8 +4,19 @@
 #define  HAVE_REMOTE
 #include <pcap.h>
 
+#ifndef WIN32
+    #include <sys/socket.h>
+    #include <netinet/in.h>
+#else
+    #include <winsock.h>
+#endif
+
+
+typedef unsigned long ULONG;
+
 int main(int argc, char *argv[])
 {
+
     pcap_if_t *alldevs;
     pcap_if_t *d;
     int inum;
@@ -18,6 +29,7 @@ int main(int argc, char *argv[])
     struct pcap_pkthdr *header;
     const u_char *pkt_data;
     time_t local_tv_sec;
+
 
     /* Retrieve the device list from the local machine */
     if (pcap_findalldevs(&alldevs, errbuf) == -1)
@@ -56,6 +68,7 @@ int main(int argc, char *argv[])
     /* Jump to the selected adapter */
     for(d=alldevs, i=0; i< inum-1 ;d=d->next, i++);
 
+
     /* Open the device */
     if ( (adhandle= pcap_open_live(d->name,     // name of the device
                                    65536,            // portion of the packet to capture
@@ -66,6 +79,34 @@ int main(int argc, char *argv[])
                                    ) ) == NULL)
     {
         fprintf(stderr,"\nUnable to open the adapter. %s is not supported by WinPcap\n", d->name);
+        /* Free the device list */
+        pcap_freealldevs(alldevs);
+        return -1;
+    }
+
+    ULONG netmask;
+    if (d->addresses != NULL)
+        /* Retrieve the mask of the first address of the interface */
+        netmask=((struct sockaddr_in *)(d->addresses->netmask))->sin_addr.s_addr;
+    else
+        /* If the interface is without an address we suppose to be in a C class network */
+        netmask=0xffffff;
+
+
+    //compile the filter
+    bpf_program fcode;
+    if (pcap_compile(adhandle, &fcode, "ip and tcp", 1, netmask) < 0)
+    {
+        fprintf(stderr,"\nUnable to compile the packet filter. Check the syntax.\n");
+        /* Free the device list */
+        pcap_freealldevs(alldevs);
+        return -1;
+    }
+
+    //set the filter
+    if (pcap_setfilter(adhandle, &fcode) < 0)
+    {
+        fprintf(stderr,"\nError setting the filter.\n");
         /* Free the device list */
         pcap_freealldevs(alldevs);
         return -1;
