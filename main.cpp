@@ -1,68 +1,144 @@
 #include <QCoreApplication>
 
-#include <stdlib.h>
-#include <stdio.h>
-
 #define  WPCAP
 #define  HAVE_REMOTE
 #include <pcap.h>
+#include <stdlib.h>
+#include <stdio.h>
+
+#ifndef WIN32
+    #include <sys/socket.h>
+    #include <netinet/in.h>
+#else
+    #include <winsock.h>
+#endif
+
+
+void usage();
+
+void dispatcher_handler(u_char *, const struct pcap_pkthdr *, const u_char *);
+
 
 int main(int argc, char *argv[])
 {
     pcap_t *fp;
     char errbuf[PCAP_ERRBUF_SIZE];
-    u_char packet[100];
-    int i;
+    struct timeval st_ts;
+    u_int netmask;
+    struct bpf_program fcode;
 
     /* Check the validity of the command line */
     if (argc != 2)
     {
-        printf("usage: %s interface (e.g. 'rpcap://eth0')", argv[0]);
+        usage();
         return -1;
     }
 
-    /* Open the output device */
-    if ( (fp= pcap_open_live(argv[1],          // name of the device
-                             100,              // portion of the packet to capture
-                             PCAP_OPENFLAG_PROMISCUOUS,    // promiscuous mode
-                             1000,             // read timeout
-                             errbuf            // error buffer
-                             ) ) == NULL)
+    /* Open the output adapter */
+    if ( (fp= pcap_open_live(argv[1], 100, PCAP_OPENFLAG_PROMISCUOUS, 1000, errbuf) ) == NULL)
     {
-        fprintf(stderr,"\nUnable to open the adapter. %s is not supported by WinPcap\n", argv[1]);
+        fprintf(stderr,"\nUnable to open adapter %s.\n", errbuf);
         return -1;
     }
 
-    /* Supposing to be on ethernet, set mac destination to 1:1:1:1:1:1 */
-    packet[0]=1;
-    packet[1]=1;
-    packet[2]=1;
-    packet[3]=1;
-    packet[4]=1;
-    packet[5]=1;
+    /* Don't care about netmask, it won't be used for this filter */
+    netmask=0xffffff;
 
-    /* set mac source to 2:2:2:2:2:2 */
-    packet[6]=2;
-    packet[7]=2;
-    packet[8]=2;
-    packet[9]=2;
-    packet[10]=2;
-    packet[11]=2;
-
-    /* Fill the rest of the packet */
-    for(i=12;i<100;i++)
+    //compile the filter
+    if (pcap_compile(fp, &fcode, "tcp", 1, netmask) <0 )
     {
-        packet[i]=(u_char)i;
-    }
-
-    /* Send down the packet */
-    if (pcap_sendpacket(fp, packet, 100 /* size */) != 0)
-    {
-        fprintf(stderr,"\nError sending the packet: %s\n", pcap_geterr(fp));
+        fprintf(stderr,"\nUnable to compile the packet filter. Check the syntax.\n");
+        /* Free the device list */
         return -1;
     }
+
+    //set the filter
+    if (pcap_setfilter(fp, &fcode)<0)
+    {
+        fprintf(stderr,"\nError setting the filter.\n");
+        pcap_close(fp);
+        /* Free the device list */
+        return -1;
+    }
+
+    // pcap_setmode() is only used for Windows.
+
+    printf("TCP traffic summary:\n");
+
+    /* Start the main loop */
+    pcap_loop(fp, 0, dispatcher_handler, (unsigned char *)&st_ts);
+
+    pcap_close(fp);
 
     QCoreApplication a(argc, argv);
 
     return a.exec();
 }
+
+void dispatcher_handler(u_char *state, const struct pcap_pkthdr *header, const u_char *pkt_data)
+{
+    struct timeval *old_ts = (struct timeval *)state;
+    typedef union _LARGE_INTEGER {
+        struct {
+            unsigned long LowPart;
+            long HighPart;
+        } DUMMYSTRUCTNAME;
+        struct {
+            unsigned long LowPart;
+            long HighPart;
+        } u;
+        long long QuadPart;
+    } LARGE_INTEGER;
+
+    u_int delay;
+    LARGE_INTEGER Bps,Pps;
+    struct tm ltime;
+    char timestr[16];
+    time_t local_tv_sec;
+
+    /* Calculate the delay in microseconds from the last sample. */
+    /* This value is obtained from the timestamp that the associated with the sample. */
+    delay=(header->ts.tv_sec - old_ts->tv_sec) * 1000000 - old_ts->tv_usec + header->ts.tv_usec;
+    /* Get the number of Bits per second */
+    Bps.QuadPart=(((*(long long*)(pkt_data + 8)) * 8 * 1000000) / (delay));
+    /*                                            ^      ^
+                                                  |      |
+                                                  |      |
+                                                  |      |
+                         converts bytes in bits --       |
+                                                         |
+                    delay is expressed in microseconds --
+    */
+
+    /* Get the number of Packets per second */
+    Pps.QuadPart=(((*(long long*)(pkt_data)) * 1000000) / (delay));
+
+    /* Convert the timestamp to readable format */
+    local_tv_sec = header->ts.tv_sec;
+    ltime = *localtime(&local_tv_sec);
+    strftime( timestr, sizeof timestr, "%H:%M:%S", &ltime);
+
+    /* Print timestamp*/
+    printf("%s ", timestr);
+
+    /* Print the samples */
+    printf("BPS=%I64u ", Bps.QuadPart);
+    printf("PPS=%I64u\n", Pps.QuadPart);
+
+    //store current timestamp
+    old_ts->tv_sec=header->ts.tv_sec;
+    old_ts->tv_usec=header->ts.tv_usec;
+}
+
+
+void usage()
+{
+
+    printf("\nShows the TCP traffic load, in bits per second and packets per second.\nCopyright (C) 2002 Loris Degioanni.\n");
+    printf("\nUsage:\n");
+    printf("\t tcptop adapter\n");
+    printf("\t You can use \"WinDump -D\" if you don't know the name of your adapters.\n");
+
+    exit(0);
+}
+
