@@ -2,7 +2,7 @@
 
 #define  WPCAP
 #define  HAVE_REMOTE
-#include <pcap.h>
+#include "pcap.h"
 
 #ifndef WIN32
     #include <sys/socket.h>
@@ -11,25 +11,52 @@
     #include <winsock.h>
 #endif
 
+/* 4 bytes IP address */
+typedef struct ip_address{
+    u_char byte1;
+    u_char byte2;
+    u_char byte3;
+    u_char byte4;
+}ip_address;
 
-typedef unsigned long ULONG;
+/* IPv4 header */
+typedef struct ip_header{
+    u_char  ver_ihl;        // Version (4 bits) + Internet header length (4 bits)
+    u_char  tos;            // Type of service
+    u_short tlen;           // Total length
+    u_short identification; // Identification
+    u_short flags_fo;       // Flags (3 bits) + Fragment offset (13 bits)
+    u_char  ttl;            // Time to live
+    u_char  proto;          // Protocol
+    u_short crc;            // Header checksum
+    ip_address  saddr;      // Source address
+    ip_address  daddr;      // Destination address
+    u_int   op_pad;         // Option + Padding
+}ip_header;
+
+/* UDP header*/
+typedef struct udp_header{
+    u_short sport;          // Source port
+    u_short dport;          // Destination port
+    u_short len;            // Datagram length
+    u_short crc;            // Checksum
+}udp_header;
+
+/* prototype of the packet handler */
+void packet_handler(u_char *param, const struct pcap_pkthdr *header, const u_char *pkt_data);
+
 
 int main(int argc, char *argv[])
 {
-
     pcap_if_t *alldevs;
     pcap_if_t *d;
     int inum;
     int i=0;
     pcap_t *adhandle;
-    int res;
     char errbuf[PCAP_ERRBUF_SIZE];
-    struct tm ltime;
-    char timestr[16];
-    struct pcap_pkthdr *header;
-    const u_char *pkt_data;
-    time_t local_tv_sec;
-
+    u_int netmask;
+    char packet_filter[] = "ip and udp";
+    struct bpf_program fcode;
 
     /* Retrieve the device list from the local machine */
     if (pcap_findalldevs(&alldevs, errbuf) == -1)
@@ -68,11 +95,10 @@ int main(int argc, char *argv[])
     /* Jump to the selected adapter */
     for(d=alldevs, i=0; i< inum-1 ;d=d->next, i++);
 
-
     /* Open the device */
-    if ( (adhandle= pcap_open_live(d->name,     // name of the device
+    if ( (adhandle= pcap_open_live(d->name,          // name of the device
                                    65536,            // portion of the packet to capture
-                                   // 65536 guarantees that the whole packet will be captured on all the link layers
+                                                     // 65536 guarantees that the whole packet will be captured on all the link layers
                                    PCAP_OPENFLAG_PROMISCUOUS,    // promiscuous mode
                                    1000,             // read timeout
                                    errbuf            // error buffer
@@ -84,18 +110,25 @@ int main(int argc, char *argv[])
         return -1;
     }
 
-    ULONG netmask;
-    if (d->addresses != NULL)
+    /* Check the link layer. We support only Ethernet for simplicity. */
+    if(pcap_datalink(adhandle) != DLT_EN10MB)
+    {
+        fprintf(stderr,"\nThis program works only on Ethernet networks.\n");
+        /* Free the device list */
+        pcap_freealldevs(alldevs);
+        return -1;
+    }
+
+    if(d->addresses != NULL)
         /* Retrieve the mask of the first address of the interface */
         netmask=((struct sockaddr_in *)(d->addresses->netmask))->sin_addr.s_addr;
     else
-        /* If the interface is without an address we suppose to be in a C class network */
+        /* If the interface is without addresses we suppose to be in a C class network */
         netmask=0xffffff;
 
 
     //compile the filter
-    bpf_program fcode;
-    if (pcap_compile(adhandle, &fcode, "ip and tcp", 1, netmask) < 0)
+    if (pcap_compile(adhandle, &fcode, packet_filter, 1, netmask) <0 )
     {
         fprintf(stderr,"\nUnable to compile the packet filter. Check the syntax.\n");
         /* Free the device list */
@@ -104,7 +137,7 @@ int main(int argc, char *argv[])
     }
 
     //set the filter
-    if (pcap_setfilter(adhandle, &fcode) < 0)
+    if (pcap_setfilter(adhandle, &fcode)<0)
     {
         fprintf(stderr,"\nError setting the filter.\n");
         /* Free the device list */
@@ -117,27 +150,61 @@ int main(int argc, char *argv[])
     /* At this point, we don't need any more the device list. Free it */
     pcap_freealldevs(alldevs);
 
-    /* Retrieve the packets */
-    while((res = pcap_next_ex( adhandle, &header, &pkt_data)) >= 0){
-
-        if(res == 0)
-            /* Timeout elapsed */
-            continue;
-
-        /* convert the timestamp to readable format */
-        local_tv_sec = header->ts.tv_sec;
-        ltime = *localtime(&local_tv_sec);
-        strftime( timestr, sizeof timestr, "%H:%M:%S", &ltime);
-
-        printf("%s,%.6d len:%d\n", timestr, header->ts.tv_usec, header->len);
-    }
-
-    if(res == -1){
-        printf("Error reading the packets: %s\n", pcap_geterr(adhandle));
-        return -1;
-    }
+    /* start the capture */
+    pcap_loop(adhandle, 0, packet_handler, NULL);
 
     QCoreApplication a(argc, argv);
 
     return a.exec();
 }
+
+/* Callback function invoked by libpcap for every incoming packet */
+void packet_handler(u_char *param, const struct pcap_pkthdr *header, const u_char *pkt_data)
+{
+    struct tm ltime;
+    char timestr[16];
+    ip_header *ih;
+    udp_header *uh;
+    u_int ip_len;
+    u_short sport,dport;
+    time_t local_tv_sec;
+
+    /*
+     * Unused variable
+     */
+    (void)(param);
+
+    /* convert the timestamp to readable format */
+    local_tv_sec = header->ts.tv_sec;
+    ltime = *localtime(&local_tv_sec);
+    strftime( timestr, sizeof timestr, "%H:%M:%S", &ltime);
+
+    /* print timestamp and length of the packet */
+    printf("%s.%.6d len:%d ", timestr, header->ts.tv_usec, header->len);
+
+    /* retireve the position of the ip header */
+    ih = (ip_header *) (pkt_data +
+                        14); //length of ethernet header
+
+    /* retireve the position of the udp header */
+    ip_len = (ih->ver_ihl & 0xf) * 4;
+    uh = (udp_header *) ((u_char*)ih + ip_len);
+
+    /* convert from network byte order to host byte order */
+    sport = ntohs( uh->sport );
+    dport = ntohs( uh->dport );
+
+    /* print ip addresses and udp ports */
+    printf("%d.%d.%d.%d.%d -> %d.%d.%d.%d.%d\n",
+           ih->saddr.byte1,
+           ih->saddr.byte2,
+           ih->saddr.byte3,
+           ih->saddr.byte4,
+           sport,
+           ih->daddr.byte1,
+           ih->daddr.byte2,
+           ih->daddr.byte3,
+           ih->daddr.byte4,
+           dport);
+}
+
