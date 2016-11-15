@@ -4,47 +4,8 @@
 #define  HAVE_REMOTE
 #include "pcap.h"
 
-#ifndef WIN32
-    #include <sys/socket.h>
-    #include <netinet/in.h>
-#else
-    #include <winsock.h>
-#endif
-
-/* 4 bytes IP address */
-typedef struct ip_address{
-    u_char byte1;
-    u_char byte2;
-    u_char byte3;
-    u_char byte4;
-}ip_address;
-
-/* IPv4 header */
-typedef struct ip_header{
-    u_char  ver_ihl;        // Version (4 bits) + Internet header length (4 bits)
-    u_char  tos;            // Type of service
-    u_short tlen;           // Total length
-    u_short identification; // Identification
-    u_short flags_fo;       // Flags (3 bits) + Fragment offset (13 bits)
-    u_char  ttl;            // Time to live
-    u_char  proto;          // Protocol
-    u_short crc;            // Header checksum
-    ip_address  saddr;      // Source address
-    ip_address  daddr;      // Destination address
-    u_int   op_pad;         // Option + Padding
-}ip_header;
-
-/* UDP header*/
-typedef struct udp_header{
-    u_short sport;          // Source port
-    u_short dport;          // Destination port
-    u_short len;            // Datagram length
-    u_short crc;            // Checksum
-}udp_header;
-
 /* prototype of the packet handler */
 void packet_handler(u_char *param, const struct pcap_pkthdr *header, const u_char *pkt_data);
-
 
 int main(int argc, char *argv[])
 {
@@ -54,9 +15,14 @@ int main(int argc, char *argv[])
     int i=0;
     pcap_t *adhandle;
     char errbuf[PCAP_ERRBUF_SIZE];
-    u_int netmask;
-    char packet_filter[] = "ip and udp";
-    struct bpf_program fcode;
+    pcap_dumper_t *dumpfile;
+
+    /* Check command line */
+    if(argc != 2)
+    {
+        printf("usage: %s filename", argv[0]);
+        return -1;
+    }
 
     /* Retrieve the device list from the local machine */
     if (pcap_findalldevs(&alldevs, errbuf) == -1)
@@ -95,6 +61,7 @@ int main(int argc, char *argv[])
     /* Jump to the selected adapter */
     for(d=alldevs, i=0; i< inum-1 ;d=d->next, i++);
 
+
     /* Open the device */
     if ( (adhandle= pcap_open_live(d->name,          // name of the device
                                    65536,            // portion of the packet to capture
@@ -110,48 +77,22 @@ int main(int argc, char *argv[])
         return -1;
     }
 
-    /* Check the link layer. We support only Ethernet for simplicity. */
-    if(pcap_datalink(adhandle) != DLT_EN10MB)
+    /* Open the dump file */
+    dumpfile = pcap_dump_open(adhandle, argv[1]);
+
+    if(dumpfile==NULL)
     {
-        fprintf(stderr,"\nThis program works only on Ethernet networks.\n");
-        /* Free the device list */
-        pcap_freealldevs(alldevs);
+        fprintf(stderr,"\nError opening output file\n");
         return -1;
     }
 
-    if(d->addresses != NULL)
-        /* Retrieve the mask of the first address of the interface */
-        netmask=((struct sockaddr_in *)(d->addresses->netmask))->sin_addr.s_addr;
-    else
-        /* If the interface is without addresses we suppose to be in a C class network */
-        netmask=0xffffff;
+    printf("\nlistening on %s... Press Ctrl+C to stop...\n", d->description);
 
-
-    //compile the filter
-    if (pcap_compile(adhandle, &fcode, packet_filter, 1, netmask) <0 )
-    {
-        fprintf(stderr,"\nUnable to compile the packet filter. Check the syntax.\n");
-        /* Free the device list */
-        pcap_freealldevs(alldevs);
-        return -1;
-    }
-
-    //set the filter
-    if (pcap_setfilter(adhandle, &fcode)<0)
-    {
-        fprintf(stderr,"\nError setting the filter.\n");
-        /* Free the device list */
-        pcap_freealldevs(alldevs);
-        return -1;
-    }
-
-    printf("\nlistening on %s...\n", d->description);
-
-    /* At this point, we don't need any more the device list. Free it */
+    /* At this point, we no longer need the device list. Free it */
     pcap_freealldevs(alldevs);
 
     /* start the capture */
-    pcap_loop(adhandle, 0, packet_handler, NULL);
+    pcap_loop(adhandle, 0, packet_handler, (unsigned char *)dumpfile);
 
     QCoreApplication a(argc, argv);
 
@@ -159,52 +100,8 @@ int main(int argc, char *argv[])
 }
 
 /* Callback function invoked by libpcap for every incoming packet */
-void packet_handler(u_char *param, const struct pcap_pkthdr *header, const u_char *pkt_data)
+void packet_handler(u_char *dumpfile, const struct pcap_pkthdr *header, const u_char *pkt_data)
 {
-    struct tm ltime;
-    char timestr[16];
-    ip_header *ih;
-    udp_header *uh;
-    u_int ip_len;
-    u_short sport,dport;
-    time_t local_tv_sec;
-
-    /*
-     * Unused variable
-     */
-    (void)(param);
-
-    /* convert the timestamp to readable format */
-    local_tv_sec = header->ts.tv_sec;
-    ltime = *localtime(&local_tv_sec);
-    strftime( timestr, sizeof timestr, "%H:%M:%S", &ltime);
-
-    /* print timestamp and length of the packet */
-    printf("%s.%.6d len:%d ", timestr, header->ts.tv_usec, header->len);
-
-    /* retireve the position of the ip header */
-    ih = (ip_header *) (pkt_data +
-                        14); //length of ethernet header
-
-    /* retireve the position of the udp header */
-    ip_len = (ih->ver_ihl & 0xf) * 4;
-    uh = (udp_header *) ((u_char*)ih + ip_len);
-
-    /* convert from network byte order to host byte order */
-    sport = ntohs( uh->sport );
-    dport = ntohs( uh->dport );
-
-    /* print ip addresses and udp ports */
-    printf("%d.%d.%d.%d.%d -> %d.%d.%d.%d.%d\n",
-           ih->saddr.byte1,
-           ih->saddr.byte2,
-           ih->saddr.byte3,
-           ih->saddr.byte4,
-           sport,
-           ih->daddr.byte1,
-           ih->daddr.byte2,
-           ih->daddr.byte3,
-           ih->daddr.byte4,
-           dport);
+    /* save the packet on the dump file */
+    pcap_dump(dumpfile, header, pkt_data);
 }
-
