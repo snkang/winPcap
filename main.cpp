@@ -4,9 +4,6 @@
 #define  HAVE_REMOTE
 #include <pcap.h>
 
-/* prototype of the packet handler */
-void packet_handler(u_char *param, const struct pcap_pkthdr *header, const u_char *pkt_data);
-
 int main(int argc, char *argv[])
 {
     pcap_if_t *alldevs;
@@ -14,7 +11,13 @@ int main(int argc, char *argv[])
     int inum;
     int i=0;
     pcap_t *adhandle;
+    int res;
     char errbuf[PCAP_ERRBUF_SIZE];
+    struct tm ltime;
+    char timestr[16];
+    struct pcap_pkthdr *header;
+    const u_char *pkt_data;
+    time_t local_tv_sec;
 
     /* Retrieve the device list from the local machine */
     if (pcap_findalldevs(&alldevs, errbuf) == -1)
@@ -73,33 +76,27 @@ int main(int argc, char *argv[])
     /* At this point, we don't need any more the device list. Free it */
     pcap_freealldevs(alldevs);
 
-    /* start the capture */
-    pcap_loop(adhandle, 0, packet_handler, NULL);
+    /* Retrieve the packets */
+    while((res = pcap_next_ex( adhandle, &header, &pkt_data)) >= 0){
+
+        if(res == 0)
+            /* Timeout elapsed */
+            continue;
+
+        /* convert the timestamp to readable format */
+        local_tv_sec = header->ts.tv_sec;
+        ltime = *localtime(&local_tv_sec);
+        strftime( timestr, sizeof timestr, "%H:%M:%S", &ltime);
+
+        printf("%s,%.6d len:%d\n", timestr, header->ts.tv_usec, header->len);
+    }
+
+    if(res == -1){
+        printf("Error reading the packets: %s\n", pcap_geterr(adhandle));
+        return -1;
+    }
 
     QCoreApplication a(argc, argv);
 
     return a.exec();
-}
-
-
-/* Callback function invoked by libpcap for every incoming packet */
-void packet_handler(u_char *param, const struct pcap_pkthdr *header, const u_char *pkt_data)
-{
-    struct tm ltime;
-    char timestr[16];
-    time_t local_tv_sec;
-
-    /*
-     * unused variables
-     */
-    (void)(param);
-    (void)(pkt_data);
-
-    /* convert the timestamp to readable format */
-    local_tv_sec = header->ts.tv_sec;
-    ltime = *localtime(&local_tv_sec);
-    strftime( timestr, sizeof timestr, "%H:%M:%S", &ltime);
-
-    printf("%s,%.6d len:%d\n", timestr, header->ts.tv_usec, header->len);
-
 }
